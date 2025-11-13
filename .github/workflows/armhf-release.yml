@@ -17,54 +17,86 @@ jobs:
     steps:
     - name: Checkout 
       uses: actions/checkout@v2
-    - name: Install armhf dependencies
+    
+    - name: Setup armhf architecture and repositories
       run: |
         sudo dpkg --add-architecture armhf
-        sudo apt-get update
-        sudo apt-get install -y libnm-dev:armhf
-    - name: Install Deps
+        
+        # Add Ubuntu ports repository for armhf packages
+        echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/armhf.list
+        echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/armhf.list
+        echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/armhf.list
+        
+        # Update package lists
+        sudo apt-get update -o Dir::Etc::sourcelist="sources.list.d/armhf.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0"
+    
+    - name: Install cross-compilation tools
       run: |
-        sudo dpkg --add-architecture armhf
-        sudo apt install gcc-12-arm-linux-gnueabihf g++-12-arm-linux-gnueabihf  libnm-dev:armhf libglib2.0-dev -y
+        sudo apt-get install -y \
+          gcc-11-arm-linux-gnueabihf \
+          g++-11-arm-linux-gnueabihf \
+          crossbuild-essential-armhf
+    
+    - name: Install armhf libraries
+      run: |
+        sudo apt-get install -y \
+          libnm-dev:armhf \
+          libglib2.0-dev:armhf
+    
+    - name: Install native development packages
+      run: |
+        sudo apt-get install -y \
+          cmake \
+          build-essential \
+          libglib2.0-dev
+    
     - name: Build
-      id: armhf-artifact-download
+      id: build-step
       run: |
         cd ${{ github.workspace }}
         mkdir build
         cd build
-        cmake ..  -DCMAKE_CXX_COMPILER=$(which arm-linux-gnueabihf-g++-12) \
-                  -DCMAKE_C_COMPILER=$(which arm-linux-gnueabihf-gcc-12) \
-                  -DARMHF_DEB=ON \
-                  -DARCHITECTURE="armhf" \
-                  -DGIT_VERSION=$(echo ${{ github.ref }} | grep -o v'[0-9]\+\.[0-9]\+\.[0-9]\+')
+        
+        # Extract version from tag (remove 'v' prefix if present)
+        VERSION=$(echo "${{ github.ref }}" | sed 's/refs\/tags\///g' | sed 's/^v//')
+        echo "Version: $VERSION"
+        
+        cmake .. \
+          -DCMAKE_CXX_COMPILER=arm-linux-gnueabihf-g++-11 \
+          -DCMAKE_C_COMPILER=arm-linux-gnueabihf-gcc-11 \
+          -DARMHF_DEB=ON \
+          -DARCHITECTURE="armhf" \
+          -DGIT_VERSION="$VERSION"
+        
         make -j$(nproc)
         make package
-        armhf__filename__=$(echo $(ls ${{steps.armhf-artifact-download.outputs.download-path}} | grep ..armhf.deb) | tr -d '\n')
-        name__=$(echo ${armhf__filename__%-*} | tr -d '\n')
-        version__=$(echo ${{ github.ref }} | grep -o v'[0-9]\+\.[0-9]\+\.[0-9]\+')
-        echo "name__=$name__" >> $GITHUB_ENV
-        echo "version__=$version__" >> $GITHUB_ENV
-        echo "armhf__filename__=$armhf__filename__" >> $GITHUB_ENV
+        
+        # Find the generated .deb file
+        ARMHF_FILENAME=$(ls *.deb | grep armhf | head -1)
+        echo "Generated package: $ARMHF_FILENAME"
+        
+        # Set environment variables for subsequent steps
+        echo "armhf_filename=$ARMHF_FILENAME" >> $GITHUB_ENV
+        echo "version=$VERSION" >> $GITHUB_ENV
+        
     - name: Create Release
       id: create_release
       uses: actions/create-release@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-          tag_name: ${{ env.version__ }}
-          release_name: Release ${{ env.version__ }}
-          draft: false
-          prerelease: false
+        tag_name: ${{ github.ref_name }}
+        release_name: Release ${{ github.ref_name }}
+        draft: false
+        prerelease: false
+    
     - name: Upload Release Asset
       id: upload-release-asset 
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-       # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, 
-       # which include a `upload_url`. See this blog post for more info: 
-       # https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps 
         upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ${{ github.workspace }}/build/${{ env.armhf__filename__ }}
-        asset_name: ${{ env.armhf__filename__ }}
+        asset_path: ${{ github.workspace }}/build/${{ env.armhf_filename }}
+        asset_name: ${{ env.armhf_filename }}
         asset_content_type: application/vnd.debian.binary-package
