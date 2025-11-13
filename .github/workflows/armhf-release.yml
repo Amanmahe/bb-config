@@ -28,14 +28,15 @@ jobs:
         echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/armhf.list
         
         # Update package lists
-        sudo apt-get update -o Dir::Etc::sourcelist="sources.list.d/armhf.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0"
+        sudo apt-get update
     
     - name: Install cross-compilation tools
       run: |
         sudo apt-get install -y \
           gcc-11-arm-linux-gnueabihf \
           g++-11-arm-linux-gnueabihf \
-          crossbuild-essential-armhf
+          crossbuild-essential-armhf \
+          pkg-config-arm-linux-gnueabihf
     
     - name: Install armhf libraries
       run: |
@@ -48,7 +49,8 @@ jobs:
         sudo apt-get install -y \
           cmake \
           build-essential \
-          libglib2.0-dev
+          libglib2.0-dev \
+          pkg-config
     
     - name: Build
       id: build-step
@@ -61,9 +63,19 @@ jobs:
         VERSION=$(echo "${{ github.ref }}" | sed 's/refs\/tags\///g' | sed 's/^v//')
         echo "Version: $VERSION"
         
+        # Set up environment for cross-compilation
+        export PKG_CONFIG_PATH=/usr/lib/arm-linux-gnueabihf/pkgconfig
+        export PKG_CONFIG_LIBDIR=/usr/lib/arm-linux-gnueabihf/pkgconfig
+        export PKG_CONFIG_SYSROOT_DIR=/
+        
         cmake .. \
           -DCMAKE_CXX_COMPILER=arm-linux-gnueabihf-g++-11 \
           -DCMAKE_C_COMPILER=arm-linux-gnueabihf-gcc-11 \
+          -DCMAKE_FIND_ROOT_PATH=/usr/arm-linux-gnueabihf \
+          -DCMAKE_PREFIX_PATH=/usr/arm-linux-gnueabihf \
+          -DCMAKE_LIBRARY_PATH=/usr/arm-linux-gnueabihf/lib \
+          -DCMAKE_INCLUDE_PATH=/usr/arm-linux-gnueabihf/include \
+          -DPKG_CONFIG_EXECUTABLE=/usr/bin/arm-linux-gnueabihf-pkg-config \
           -DARMHF_DEB=ON \
           -DARCHITECTURE="armhf" \
           -DGIT_VERSION="$VERSION"
