@@ -21,15 +21,32 @@ jobs:
       run: |
         sudo dpkg --add-architecture arm64
         
-        # Remove any existing arm64 lists to avoid conflicts
-        sudo rm -f /etc/apt/sources.list.d/armhf.list /etc/apt/sources.list.d/arm64.list 2>/dev/null || true
+        # Create a temporary apt configuration to ONLY use ports for arm64
+        sudo mkdir -p /etc/apt/sources.list.d
+        sudo rm -f /etc/apt/sources.list.d/arm64-ports.list
         
         # Create sources.list.d for arm64 with ONLY ports repository
         echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/arm64-ports.list
         echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64-ports.list
         echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64-ports.list
         
-        # Update package lists for ALL architectures
+        # Create apt preferences to prioritize ports repository for arm64
+        sudo mkdir -p /etc/apt/preferences.d
+        cat << EOF | sudo tee /etc/apt/preferences.d/arm64-ports
+        Package: *
+        Pin: release a=jammy
+        Pin-Priority: 500
+
+        Package: *
+        Pin: release o=Ubuntu,a=jammy
+        Pin-Priority: 500
+
+        Package: *
+        Pin: release l=UbuntuPorts
+        Pin-Priority: 1000
+        EOF
+        
+        # Update package lists
         sudo apt-get update
     
     - name: Install cross-compilation tools
@@ -42,7 +59,7 @@ jobs:
     
     - name: Install arm64 libraries
       run: |
-        # Install arm64 packages using apt-get with architecture specification
+        # Install arm64 packages - they should come from ports repository
         sudo apt-get install -y \
           libnm-dev:arm64 \
           libglib2.0-dev:arm64 \
