@@ -19,15 +19,18 @@ jobs:
       with:
         platforms: arm64
 
-    - name: Build using Docker
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: Build ARM64 package
       run: |
         # Extract version from tag
         VERSION=$(echo "${{ github.ref }}" | sed 's/refs\/tags\///g' | sed 's/^v//')
         echo "Building version: $VERSION"
         
         # Create a Dockerfile for native ARM64 build
-        cat > Dockerfile << EOF
-        FROM arm64v8/ubuntu:22.04
+        cat > Dockerfile << 'EOF'
+        FROM ubuntu:22.04
 
         # Set up environment
         ENV DEBIAN_FRONTEND=noninteractive
@@ -53,14 +56,18 @@ jobs:
               -DCMAKE_CXX_FLAGS="-mcpu=cortex-a53 -mtune=cortex-a53 -O2 -pipe" \
               -DARCHITECTURE="arm64" \
               -DGIT_VERSION="$VERSION" && \
-            make -j\$(nproc) && \
+            make -j$(nproc) && \
             make package
         EOF
 
-        # Build using Docker
-        docker build --build-arg VERSION=$VERSION -t arm64-builder .
+        # Build for ARM64 using buildx
+        docker buildx build \
+          --platform linux/arm64 \
+          --tag arm64-builder \
+          --load \
+          .
         
-        # Extract the built package
+        # Create container and extract package
         docker create --name builder arm64-builder
         docker cp builder:/build/build/ ./
         docker rm builder
