@@ -7,7 +7,7 @@ on:
 
 jobs:
   arm64:
-    name: build-arm64-native
+    name: build-arm64-deb
     runs-on: ubuntu-22.04
     
     steps:
@@ -22,11 +22,11 @@ jobs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v2
 
-    - name: Build ARM64 package
+    - name: Build ARM64 Debian package
       run: |
         # Extract version from tag
         VERSION=$(echo "${{ github.ref }}" | sed 's/refs\/tags\///g' | sed 's/^v//')
-        echo "Building version: $VERSION"
+        echo "Building version: $VERSION for PocketBeagle 2 (ARM64)"
         
         # Create a Dockerfile for native ARM64 build
         cat > Dockerfile << 'EOF'
@@ -57,7 +57,8 @@ jobs:
               -DARCHITECTURE="arm64" \
               -DGIT_VERSION="$VERSION" && \
             make -j$(nproc) && \
-            make package
+            # Generate DEB package with proper architecture
+            cpack -G DEB -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=arm64
         EOF
 
         # Build for ARM64 using buildx
@@ -74,9 +75,22 @@ jobs:
         
         # Find the generated .deb file
         ARM64_FILENAME=$(ls build/*.deb | head -1)
+        if [ -z "$ARM64_FILENAME" ]; then
+          echo "Error: No .deb file found!"
+          ls -la build/
+          exit 1
+        fi
+        
         echo "Generated package: $ARM64_FILENAME"
         echo "arm64_filename=$(basename $ARM64_FILENAME)" >> $GITHUB_ENV
         echo "version=$VERSION" >> $GITHUB_ENV
+
+    - name: Verify Debian package
+      run: |
+        echo "Verifying Debian package structure..."
+        dpkg-deb -I ./build/${{ env.arm64_filename }}
+        echo "Package contents:"
+        dpkg-deb -c ./build/${{ env.arm64_filename }}
 
     - name: Create Release
       id: create_release
