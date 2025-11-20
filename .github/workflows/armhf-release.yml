@@ -2,9 +2,8 @@ name: arm64 release
 
 on:
   push:
-    # Sequence of patterns matched against refs/tags
     tags:
-    - 'v*' # Push events to matching v*, i.e. v1.0, v20.15.10
+    - 'v*'
 
 env:
   BUILD_TYPE: Release
@@ -22,20 +21,19 @@ jobs:
       run: |
         sudo dpkg --add-architecture arm64
         
-        # Remove any existing arm64.list to avoid conflicts
-        sudo rm -f /etc/apt/sources.list.d/arm64.list
+        # Remove any existing arm64 lists to avoid conflicts
+        sudo rm -f /etc/apt/sources.list.d/armhf.list /etc/apt/sources.list.d/arm64.list 2>/dev/null || true
         
-        # Create a clean sources.list.d for arm64 with ONLY ports repository
+        # Create sources.list.d for arm64 with ONLY ports repository
         echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/arm64-ports.list
         echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64-ports.list
         echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64-ports.list
         
-        # Update package lists specifically for arm64
-        sudo apt-get update -o Dir::Etc::sourcelist="sources.list.d/arm64-ports.list" -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0"
+        # Update package lists for ALL architectures
+        sudo apt-get update
     
     - name: Install cross-compilation tools
       run: |
-        sudo apt-get update
         sudo apt-get install -y \
           gcc-11-aarch64-linux-gnu \
           g++-11-aarch64-linux-gnu \
@@ -44,18 +42,17 @@ jobs:
     
     - name: Install arm64 libraries
       run: |
-        # Install arm64 packages using the ports repository
+        # Install arm64 packages using apt-get with architecture specification
         sudo apt-get install -y \
           libnm-dev:arm64 \
           libglib2.0-dev:arm64 \
-          --allow-unauthenticated
+          libc6-dev:arm64
     
     - name: Install native development packages
       run: |
         sudo apt-get install -y \
           cmake \
           build-essential \
-          libglib2.0-dev \
           pkg-config
     
     - name: Build
