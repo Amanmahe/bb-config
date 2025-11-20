@@ -5,127 +5,72 @@ on:
     tags:
     - 'v*'
 
-env:
-  BUILD_TYPE: Release
-
 jobs:
   arm64:
-    name: build-arm64
+    name: build-arm64-native
     runs-on: ubuntu-22.04
-
+    
     steps:
-    - name: Checkout 
+    - name: Checkout
       uses: actions/checkout@v2
-    
-    - name: Setup arm64 architecture and repositories
-      run: |
-        sudo dpkg --add-architecture arm64
-        
-        # Create a temporary apt configuration to ONLY use ports for arm64
-        sudo mkdir -p /etc/apt/sources.list.d
-        sudo rm -f /etc/apt/sources.list.d/arm64-ports.list
-        
-        # Create sources.list.d for arm64 with ONLY ports repository
-        echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/arm64-ports.list
-        echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64-ports.list
-        echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64-ports.list
-        
-        # Create apt preferences to prioritize ports repository for arm64
-        sudo mkdir -p /etc/apt/preferences.d
-        cat << EOF | sudo tee /etc/apt/preferences.d/arm64-ports
-        Package: *
-        Pin: release a=jammy
-        Pin-Priority: 500
 
-        Package: *
-        Pin: release o=Ubuntu,a=jammy
-        Pin-Priority: 500
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v2
+      with:
+        platforms: arm64
 
-        Package: *
-        Pin: release l=UbuntuPorts
-        Pin-Priority: 1000
-        EOF
-        
-        # Update package lists
-        sudo apt-get update
-    
-    - name: Install cross-compilation tools
+    - name: Build using Docker
       run: |
-        sudo apt-get install -y \
-          gcc-11-aarch64-linux-gnu \
-          g++-11-aarch64-linux-gnu \
-          crossbuild-essential-arm64 \
-          pkg-config-aarch64-linux-gnu
-    
-    - name: Install arm64 libraries
-      run: |
-        # Install arm64 packages - they should come from ports repository
-        sudo apt-get install -y \
-          libnm-dev:arm64 \
-          libglib2.0-dev:arm64 \
-          libc6-dev:arm64
-    
-    - name: Install native development packages
-      run: |
-        sudo apt-get install -y \
-          cmake \
-          build-essential \
-          pkg-config
-    
-    - name: Build
-      id: build-step
-      run: |
-        cd ${{ github.workspace }}
-        mkdir build
-        cd build
-        
-        # Extract version from tag (remove 'v' prefix if present)
+        # Extract version from tag
         VERSION=$(echo "${{ github.ref }}" | sed 's/refs\/tags\///g' | sed 's/^v//')
-        echo "Version: $VERSION"
+        echo "Building version: $VERSION"
         
-        # Set up environment for cross-compilation
-        export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
-        export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig
-        export PKG_CONFIG_SYSROOT_DIR=/
+        # Create a Dockerfile for native ARM64 build
+        cat > Dockerfile << EOF
+        FROM arm64v8/ubuntu:22.04
+
+        # Set up environment
+        ENV DEBIAN_FRONTEND=noninteractive
         
-        # Create a toolchain file for cross-compilation with Cortex-A53 optimizations
-        cat > toolchain.cmake << 'EOF'
-        set(CMAKE_SYSTEM_NAME Linux)
-        set(CMAKE_SYSTEM_PROCESSOR aarch64)
-        
-        set(CMAKE_C_COMPILER aarch64-linux-gnu-gcc-11)
-        set(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++-11)
-        
-        # PocketBeagle 2 specific optimizations for Cortex-A53
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mcpu=cortex-a53 -mtune=cortex-a53 -O2 -pipe")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mcpu=cortex-a53 -mtune=cortex-a53 -O2 -pipe")
-        
-        set(CMAKE_FIND_ROOT_PATH /usr/aarch64-linux-gnu)
-        set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-        set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-        set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-        set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
-        
-        set(PKG_CONFIG_EXECUTABLE /usr/bin/aarch64-linux-gnu-pkg-config)
+        # Update and install dependencies
+        RUN apt-get update && apt-get install -y \
+            build-essential \
+            cmake \
+            pkg-config \
+            libnm-dev \
+            libglib2.0-dev \
+            debhelper \
+            dh-make \
+            git \
+            && rm -rf /var/lib/apt/lists/*
+
+        WORKDIR /build
+        COPY . .
+
+        RUN mkdir build && cd build && \
+            cmake .. \
+              -DCMAKE_C_FLAGS="-mcpu=cortex-a53 -mtune=cortex-a53 -O2 -pipe" \
+              -DCMAKE_CXX_FLAGS="-mcpu=cortex-a53 -mtune=cortex-a53 -O2 -pipe" \
+              -DARCHITECTURE="arm64" \
+              -DGIT_VERSION="$VERSION" && \
+            make -j\$(nproc) && \
+            make package
         EOF
+
+        # Build using Docker
+        docker build --build-arg VERSION=$VERSION -t arm64-builder .
         
-        cmake .. \
-          -DCMAKE_TOOLCHAIN_FILE=toolchain.cmake \
-          -DARM64_DEB=ON \
-          -DARCHITECTURE="arm64" \
-          -DGIT_VERSION="$VERSION"
-        
-        make -j$(nproc)
-        make package
+        # Extract the built package
+        docker create --name builder arm64-builder
+        docker cp builder:/build/build/ ./
+        docker rm builder
         
         # Find the generated .deb file
-        ARM64_FILENAME=$(ls *.deb | grep arm64 | head -1)
+        ARM64_FILENAME=$(ls build/*.deb | head -1)
         echo "Generated package: $ARM64_FILENAME"
-        
-        # Set environment variables for subsequent steps
-        echo "arm64_filename=$ARM64_FILENAME" >> $GITHUB_ENV
+        echo "arm64_filename=$(basename $ARM64_FILENAME)" >> $GITHUB_ENV
         echo "version=$VERSION" >> $GITHUB_ENV
-        
+
     - name: Create Release
       id: create_release
       uses: actions/create-release@v1
@@ -136,14 +81,13 @@ jobs:
         release_name: Release ${{ github.ref_name }}
         draft: false
         prerelease: false
-    
+
     - name: Upload Release Asset
-      id: upload-release-asset 
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ${{ github.workspace }}/build/${{ env.arm64_filename }}
+        asset_path: ./build/${{ env.arm64_filename }}
         asset_name: ${{ env.arm64_filename }}
         asset_content_type: application/vnd.debian.binary-package
