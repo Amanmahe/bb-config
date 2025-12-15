@@ -239,7 +239,7 @@ class Gpio : public ComponentBase {
 std::string exec(const char* cmd) {
     std::array<char, 128> buffer;
     std::string result;
-    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd, "r"), pclose);
+    std::unique_ptr<FILE, int(*)(FILE*)> pipe(popen(cmd, "r"), pclose);
     if (!pipe) {
         return "";
     }
