@@ -5,231 +5,190 @@ on:
     tags:
       - 'v*'
 
-env:
-  BUILD_TYPE: Release
-
 jobs:
-  build-arm-packages:
-    name: Build ARM Packages
+  build-packages:
+    name: Build ${{ matrix.arch }} Package
     runs-on: ubuntu-22.04
     strategy:
       matrix:
         arch: [arm64, armhf]
+        include:
+          - arch: arm64
+            docker_platform: linux/arm64
+            deb_arch: arm64
+            cpu_flags: "-mcpu=cortex-a53 -mtune=cortex-a53"
+          - arch: armhf
+            docker_platform: linux/arm
+            deb_arch: armhf
+            cpu_flags: "-mcpu=cortex-a8 -mtune=cortex-a8"
     
     steps:
     - name: Checkout
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
     
     - name: Extract Version
-      id: extract_version
+      id: version
       run: |
         VERSION=$(echo "${{ github.ref }}" | sed 's|refs/tags/||' | sed 's/^v//')
         echo "VERSION=$VERSION" >> $GITHUB_ENV
         echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "Building version: $VERSION"
-
-    - name: Setup QEMU (for ARM64)
-      if: matrix.arch == 'arm64'
+    
+    - name: Setup QEMU
       uses: docker/setup-qemu-action@v3
-      with:
-        platforms: arm64
-
+    
     - name: Setup Buildx
-      if: matrix.arch == 'arm64'
       uses: docker/setup-buildx-action@v3
-
-    - name: Install Cross-Compiler Dependencies (for ARMHF)
-      if: matrix.arch == 'armhf'
-      run: |
-        # Enable ARMHF architecture
-        sudo dpkg --add-architecture armhf
-        
-        # Add the ports repository which contains ARMHF packages
-        echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/armhf.list
-        echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/armhf.list
-        echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/armhf.list
-        
-        # Add ARMHF key
-        sudo apt-get update
-        sudo apt-get install -y debian-archive-keyring ubuntu-keyring
-        
-        # Update package lists with new sources
-        sudo apt-get update
-        
-        # Install cross-compiler and libraries
-        sudo apt-get install -y \
-          gcc-12-arm-linux-gnueabihf \
-          g++-12-arm-linux-gnueabihf \
-          libnm-dev:armhf \
-          libglib2.0-dev:armhf \
-          cmake \
-          build-essential \
-          pkg-config \
-          debhelper \
-          dh-make \
-          file \
-          git
-
-    - name: Build Package
-      id: build_package
+    
+    - name: Build with Docker
       run: |
         echo "Building for ${{ matrix.arch }}"
         
-        if [ "${{ matrix.arch }}" = "arm64" ]; then
-          # Build ARM64 using Docker/QEMU emulation
-          echo "Building ARM64 package using Docker"
-          
-          cat > Dockerfile.build << 'EOF'
-          FROM ubuntu:22.04
-
-          ENV DEBIAN_FRONTEND=noninteractive
-          
-          RUN apt-get update && apt-get install -y \
-              build-essential \
-              cmake \
-              pkg-config \
-              libnm-dev \
-              libglib2.0-dev \
-              debhelper \
-              dh-make \
-              git \
-              file \
-              && rm -rf /var/lib/apt/lists/*
-
-          WORKDIR /build
-          COPY . .
-
-          RUN mkdir -p build && cd build && \
-              cmake .. \
-                -DCMAKE_C_FLAGS="-mcpu=cortex-a53 -mtune=cortex-a53 -O2 -pipe" \
-                -DCMAKE_CXX_FLAGS="-mcpu=cortex-a53 -mtune=cortex-a53 -O2 -pipe" \
-                -DARCHITECTURE="arm64" \
-                -DGIT_VERSION="${{ env.VERSION }}" && \
-              make -j$(nproc) && \
-              cpack -G DEB -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=arm64
-          EOF
-
-          docker buildx build \
-            --platform linux/arm64 \
-            --tag arm64-builder \
-            --load \
-            -f Dockerfile.build \
-            .
-          
-          docker create --name builder arm64-builder
-          docker cp builder:/build/build/ ./
-          docker rm builder
-          
-          # Find and rename the generated .deb file
-          DEB_FILE=$(find build -name "*.deb" -type f | head -1)
-          if [ -n "$DEB_FILE" ]; then
-            mv "$DEB_FILE" "package_${{ matrix.arch }}.deb"
-          fi
-          
+        # Create a Dockerfile
+        cat > Dockerfile.build << 'DOCKERFILE'
+        FROM ubuntu:22.04
+        
+        ARG VERSION
+        ARG CPU_FLAGS
+        ARG DEB_ARCH
+        ENV DEBIAN_FRONTEND=noninteractive
+        
+        RUN apt-get update && apt-get install -y \
+            build-essential \
+            cmake \
+            pkg-config \
+            libnm-dev \
+            libglib2.0-dev \
+            debhelper \
+            dh-make \
+            git \
+            file \
+            && rm -rf /var/lib/apt/lists/*
+        
+        WORKDIR /build
+        COPY . .
+        
+        RUN mkdir -p build && cd build && \
+            cmake .. \
+              -DCMAKE_C_FLAGS="$CPU_FLAGS -O2 -pipe" \
+              -DCMAKE_CXX_FLAGS="$CPU_FLAGS -O2 -pipe" \
+              -DARCHITECTURE="$DEB_ARCH" \
+              -DGIT_VERSION="$VERSION" && \
+            make -j$(nproc) && \
+            cpack -G DEB -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=$DEB_ARCH
+        DOCKERFILE
+        
+        echo "Building Docker image..."
+        docker buildx build \
+          --platform ${{ matrix.docker_platform }} \
+          --tag ${{ matrix.arch }}-builder \
+          --build-arg VERSION="${{ env.VERSION }}" \
+          --build-arg CPU_FLAGS="${{ matrix.cpu_flags }}" \
+          --build-arg DEB_ARCH="${{ matrix.deb_arch }}" \
+          --load \
+          -f Dockerfile.build \
+          .
+        
+        echo "Extracting package from container..."
+        docker create --name builder ${{ matrix.arch }}-builder
+        docker cp builder:/build/build/ ./
+        docker rm builder
+        
+        # Find and copy the package
+        DEB_FILE=$(find build -name "*.deb" -type f | head -1)
+        if [ -n "$DEB_FILE" ]; then
+          # Extract package info for better naming
+          PKG_NAME=$(basename "$DEB_FILE")
+          mv "$DEB_FILE" "package_${{ matrix.arch }}.deb"
+          echo "Package created: package_${{ matrix.arch }}.deb"
+          ls -la "package_${{ matrix.arch }}.deb"
+          echo "package_filename=package_${{ matrix.arch }}.deb" >> $GITHUB_ENV
+          echo "original_pkg_name=$PKG_NAME" >> $GITHUB_ENV
         else
-          # Build ARMHF using cross-compiler
-          echo "Building ARMHF package using cross-compiler"
-          
-          mkdir -p build_armhf
-          cd build_armhf
-          
-          cmake .. \
-            -DCMAKE_CXX_COMPILER=$(which arm-linux-gnueabihf-g++-12) \
-            -DCMAKE_C_COMPILER=$(which arm-linux-gnueabihf-gcc-12) \
-            -DARCHITECTURE="armhf" \
-            -DGIT_VERSION="${{ env.VERSION }}"
-          
-          make -j$(nproc)
-          make package
-          
-          # Find and rename the generated .deb file
-          DEB_FILE=$(find . -name "*armhf.deb" -type f | head -1)
-          if [ -n "$DEB_FILE" ]; then
-            mv "$DEB_FILE" "../package_${{ matrix.arch }}.deb"
-          fi
-        fi
-
-        # Verify package exists
-        if [ -f "package_${{ matrix.arch }}.deb" ]; then
-          echo "Package built successfully: package_${{ matrix.arch }}.deb"
-          echo "package_path=package_${{ matrix.arch }}.deb" >> $GITHUB_OUTPUT
-        else
-          echo "ERROR: No package file found!"
-          ls -la
+          echo "ERROR: No .deb file found!"
+          find . -name "*.deb" -type f
           exit 1
         fi
-
+    
     - name: Verify Package
-      id: verify_package
       run: |
-        echo "Verifying ${{ matrix.arch }} package..."
-        
-        PACKAGE_PATH="${{ steps.build_package.outputs.package_path }}"
-        
-        if [ -f "$PACKAGE_PATH" ]; then
-          echo "Package file: $PACKAGE_PATH"
+        echo "Verifying package..."
+        if [ -f "package_${{ matrix.arch }}.deb" ]; then
           echo "Package info:"
-          dpkg-deb -I "$PACKAGE_PATH" || true
-          
-          # Extract package metadata
-          PACKAGE_NAME=$(dpkg-deb -f "$PACKAGE_PATH" Package 2>/dev/null || echo "unknown-package")
-          PACKAGE_VERSION=$(dpkg-deb -f "$PACKAGE_PATH" Version 2>/dev/null || echo "unknown-version")
-          
-          # Create proper filename
-          ORIG_FILENAME="${PACKAGE_NAME}_${PACKAGE_VERSION}_${{ matrix.arch }}.deb"
-          echo "Original filename will be: $ORIG_FILENAME"
-          
-          # Rename package with proper architecture
-          mv "$PACKAGE_PATH" "$ORIG_FILENAME"
-          
-          echo "orig_filename=$ORIG_FILENAME" >> $GITHUB_OUTPUT
-          echo "ORIG_FILENAME=$ORIG_FILENAME" >> $GITHUB_ENV
+          dpkg-deb -I "package_${{ matrix.arch }}.deb" || true
+          echo ""
+          echo "Package contents:"
+          dpkg-deb -c "package_${{ matrix.arch }}.deb" | head -20
         else
-          echo "ERROR: Package file not found at $PACKAGE_PATH!"
-          ls -la
+          echo "ERROR: Package file not found!"
           exit 1
         fi
-
+    
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.arch }}-package
-        path: ${{ env.ORIG_FILENAME }}
+        path: package_${{ matrix.arch }}.deb
         retention-days: 5
 
   create-release:
     name: Create Release and Upload Assets
     runs-on: ubuntu-22.04
-    needs: build-arm-packages
+    needs: build-packages
     if: success()
-
+    
     steps:
     - name: Checkout
       uses: actions/checkout@v4
-
+    
     - name: Download All Artifacts
       uses: actions/download-artifact@v4
       with:
         path: artifacts/
-
-    - name: Extract Version
+        pattern: '*'
+        merge-multiple: true
+    
+    - name: List Downloaded Files
       run: |
-        VERSION=$(echo "${{ github.ref }}" | sed 's|refs/tags/||' | sed 's/^v//')
-        echo "VERSION=$VERSION" >> $GITHUB_ENV
-        echo "Creating release for version: $VERSION"
-
-    - name: List Downloaded Artifacts
-      run: |
-        echo "Downloaded artifacts structure:"
+        echo "Downloaded artifacts:"
         find artifacts/ -type f -name "*.deb" | while read file; do
           echo "Found: $file"
           dpkg-deb -I "$file" 2>/dev/null | grep -E "(Package|Version|Architecture)" || echo "Could not read package info"
         done
-
-    - name: Create Release
-      id: create_release
+    
+    - name: Extract Version
+      run: |
+        VERSION=$(echo "${{ github.ref }}" | sed 's|refs/tags/||' | sed 's/^v//')
+        echo "VERSION=$VERSION" >> $GITHUB_ENV
+    
+    - name: Find Package Files
+      id: find_packages
+      run: |
+        # Find all .deb files in artifacts
+        ARM64_PKG=$(find artifacts/ -name "*arm64*.deb" -o -name "*package_arm64.deb" -o -path "*/arm64-package/*.deb" | head -1)
+        ARMHF_PKG=$(find artifacts/ -name "*armhf*.deb" -o -name "*package_armhf.deb" -o -path "*/armhf-package/*.deb" | head -1)
+        
+        if [ -n "$ARM64_PKG" ]; then
+          ARM64_BASENAME=$(basename "$ARM64_PKG")
+          echo "arm64_package=$ARM64_PKG" >> $GITHUB_OUTPUT
+          echo "arm64_basename=$ARM64_BASENAME" >> $GITHUB_OUTPUT
+          echo "Found ARM64 package: $ARM64_PKG"
+        else
+          echo "ERROR: ARM64 package not found!"
+          find artifacts/ -type f
+        fi
+        
+        if [ -n "$ARMHF_PKG" ]; then
+          ARMHF_BASENAME=$(basename "$ARMHF_PKG")
+          echo "armhf_package=$ARMHF_PKG" >> $GITHUB_OUTPUT
+          echo "armhf_basename=$ARMHF_BASENAME" >> $GITHUB_OUTPUT
+          echo "Found ARMHF package: $ARMHF_PKG"
+        else
+          echo "ERROR: ARMHF package not found!"
+          find artifacts/ -type f
+        fi
+    
+    - name: Create Release with Assets
       uses: softprops/action-gh-release@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -239,71 +198,26 @@ jobs:
         draft: false
         prerelease: false
         body: |
-          ARM Cross-Platform Release
+          ARM Cross-Platform Release v${{ env.VERSION }}
           
-          This release contains packages for both ARM architectures:
+          This release contains Debian packages for both ARM architectures:
           - **ARM64** (64-bit): For PocketBeagle 2 and other ARMv8/AArch64 devices
           - **ARMHF** (32-bit): For ARMv7 devices with hard-float ABI
           
-          ### Download Links
-          - ARM64 Package: [$(basename $(find artifacts/ -name "*arm64*.deb" -o -name "*arm64-package*/*.deb" 2>/dev/null | head -1))](#)
-          - ARMHF Package: [$(basename $(find artifacts/ -name "*armhf*.deb" -o -name "*armhf-package*/*.deb" 2>/dev/null | head -1))](#)
-
-    - name: Upload ARM64 Asset to Release
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ### Installation
+          ```bash
+          # ARM64 devices
+          sudo dpkg -i ${{ steps.find_packages.outputs.arm64_basename }}
+          
+          # ARMHF devices  
+          sudo dpkg -i ${{ steps.find_packages.outputs.armhf_basename }}
+          ```
+        files: |
+          ${{ steps.find_packages.outputs.arm64_package }}
+          ${{ steps.find_packages.outputs.armhf_package }}
+    
+    - name: Verify Release Creation
       run: |
-        # Find the ARM64 package
-        ARM64_PACKAGE=$(find artifacts/ -name "*arm64*.deb" -o -path "*/arm64-package/*.deb" 2>/dev/null | head -1)
-        
-        if [ -z "$ARM64_PACKAGE" ]; then
-          echo "ERROR: ARM64 package not found!"
-          find artifacts/ -type f
-          exit 1
-        fi
-        
-        echo "Uploading ARM64 package: $ARM64_PACKAGE"
-        
-        # Use GitHub CLI to upload the asset
-        gh release upload "${{ github.ref_name }}" "$ARM64_PACKAGE" \
-          --repo "${{ github.repository }}"
-      continue-on-error: false
-
-    - name: Upload ARMHF Asset to Release
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        # Find the ARMHF package
-        ARMHF_PACKAGE=$(find artifacts/ -name "*armhf*.deb" -o -path "*/armhf-package/*.deb" 2>/dev/null | head -1)
-        
-        if [ -z "$ARMHF_PACKAGE" ]; then
-          echo "ERROR: ARMHF package not found!"
-          find artifacts/ -type f
-          exit 1
-        fi
-        
-        echo "Uploading ARMHF package: $ARMHF_PACKAGE"
-        
-        # Use GitHub CLI to upload the asset
-        gh release upload "${{ github.ref_name }}" "$ARMHF_PACKAGE" \
-          --repo "${{ github.repository }}"
-      continue-on-error: false
-
-    - name: Install GitHub CLI (if not present)
-      if: failure()
-      run: |
-        # Install GitHub CLI if needed for upload
-        type -p gh >/dev/null || curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
-        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
-        sudo apt update
-        sudo apt install -y gh
-
-    - name: List Generated Packages
-      run: |
-        echo "Generated packages:"
-        find artifacts/ -name "*.deb" -type f | while read pkg; do
-          echo "=== $(basename "$pkg") ==="
-          dpkg-deb -I "$pkg" 2>/dev/null | grep -E "(Package|Version|Architecture|Depends|Installed-Size)" || echo "Could not read package info"
-          echo "Path: $pkg"
-          echo ""
-        done
+        echo "Release created successfully!"
+        echo "ARM64 package: ${{ steps.find_packages.outputs.arm64_basename }}"
+        echo "ARMHF package: ${{ steps.find_packages.outputs.armhf_basename }}"
