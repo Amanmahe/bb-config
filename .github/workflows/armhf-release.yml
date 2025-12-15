@@ -43,8 +43,22 @@ jobs:
     - name: Install Cross-Compiler Dependencies (for ARMHF)
       if: matrix.arch == 'armhf'
       run: |
+        # Enable ARMHF architecture
         sudo dpkg --add-architecture armhf
+        
+        # Add the ports repository which contains ARMHF packages
+        echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/armhf.list
+        echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/armhf.list
+        echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/armhf.list
+        
+        # Add ARMHF key
         sudo apt-get update
+        sudo apt-get install -y debian-archive-keyring ubuntu-keyring
+        
+        # Update package lists with new sources
+        sudo apt-get update
+        
+        # Install cross-compiler and libraries
         sudo apt-get install -y \
           gcc-12-arm-linux-gnueabihf \
           g++-12-arm-linux-gnueabihf \
@@ -55,7 +69,8 @@ jobs:
           pkg-config \
           debhelper \
           dh-make \
-          file
+          file \
+          git
 
     - name: Build Package
       id: build_package
