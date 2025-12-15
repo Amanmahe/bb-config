@@ -1,96 +1,191 @@
-name: arm64 release
+name: ARM Cross-Platform Release
 
 on:
   push:
     tags:
-    - 'v*'
+      - 'v*'
+
+env:
+  BUILD_TYPE: Release
 
 jobs:
-  arm64:
-    name: build-arm64-deb
+  build-arm-packages:
+    name: Build ARM Packages
     runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        arch: [arm64, armhf]
     
     steps:
     - name: Checkout
-      uses: actions/checkout@v2
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+    
+    - name: Extract Version
+      run: |
+        VERSION=$(echo "${{ github.ref }}" | sed 's|refs/tags/||' | sed 's/^v//')
+        echo "VERSION=$VERSION" >> $GITHUB_ENV
+        echo "Building version: $VERSION"
 
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v2
+    - name: Setup QEMU (for ARM64)
+      if: matrix.arch == 'arm64'
+      uses: docker/setup-qemu-action@v3
       with:
         platforms: arm64
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v2
+    - name: Setup Buildx
+      if: matrix.arch == 'arm64'
+      uses: docker/setup-buildx-action@v3
 
-    - name: Build ARM64 Debian package
+    - name: Install Cross-Compiler Dependencies (for ARMHF)
+      if: matrix.arch == 'armhf'
       run: |
-        # Extract version from tag
-        VERSION=$(echo "${{ github.ref }}" | sed 's/refs\/tags\///g' | sed 's/^v//')
-        echo "Building version: $VERSION for PocketBeagle 2 (ARM64)"
-        
-        # Create a Dockerfile for native ARM64 build
-        cat > Dockerfile << 'EOF'
-        FROM ubuntu:22.04
+        sudo dpkg --add-architecture armhf
+        sudo apt-get update
+        sudo apt-get install -y \
+          gcc-12-arm-linux-gnueabihf \
+          g++-12-arm-linux-gnueabihf \
+          libnm-dev:armhf \
+          libglib2.0-dev:armhf \
+          cmake \
+          build-essential \
+          pkg-config \
+          debhelper \
+          dh-make \
+          file
 
-        # Set up environment
-        ENV DEBIAN_FRONTEND=noninteractive
+    - name: Build Package
+      run: |
+        echo "Building for ${{ matrix.arch }}"
         
-        # Update and install dependencies
-        RUN apt-get update && apt-get install -y \
-            build-essential \
-            cmake \
-            pkg-config \
-            libnm-dev \
-            libglib2.0-dev \
-            debhelper \
-            dh-make \
-            git \
-            && rm -rf /var/lib/apt/lists/*
+        if [ "${{ matrix.arch }}" = "arm64" ]; then
+          # Build ARM64 using Docker/QEMU emulation
+          echo "Building ARM64 package using Docker"
+          
+          cat > Dockerfile.build << 'EOF'
+          FROM ubuntu:22.04
 
-        WORKDIR /build
-        COPY . .
+          ENV DEBIAN_FRONTEND=noninteractive
+          
+          RUN apt-get update && apt-get install -y \
+              build-essential \
+              cmake \
+              pkg-config \
+              libnm-dev \
+              libglib2.0-dev \
+              debhelper \
+              dh-make \
+              git \
+              file \
+              && rm -rf /var/lib/apt/lists/*
 
-        RUN mkdir build && cd build && \
-            cmake .. \
-              -DCMAKE_C_FLAGS="-mcpu=cortex-a53 -mtune=cortex-a53 -O2 -pipe" \
-              -DCMAKE_CXX_FLAGS="-mcpu=cortex-a53 -mtune=cortex-a53 -O2 -pipe" \
-              -DARCHITECTURE="arm64" \
-              -DGIT_VERSION="$VERSION" && \
-            make -j$(nproc) && \
-            # Generate DEB package with proper architecture
-            cpack -G DEB -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=arm64
-        EOF
+          WORKDIR /build
+          COPY . .
 
-        # Build for ARM64 using buildx
-        docker buildx build \
-          --platform linux/arm64 \
-          --tag arm64-builder \
-          --load \
-          .
+          RUN mkdir -p build && cd build && \
+              cmake .. \
+                -DCMAKE_C_FLAGS="-mcpu=cortex-a53 -mtune=cortex-a53 -O2 -pipe" \
+                -DCMAKE_CXX_FLAGS="-mcpu=cortex-a53 -mtune=cortex-a53 -O2 -pipe" \
+                -DARCHITECTURE="arm64" \
+                -DGIT_VERSION="${{ env.VERSION }}" && \
+              make -j$(nproc) && \
+              cpack -G DEB -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=arm64
+          EOF
+
+          docker buildx build \
+            --platform linux/arm64 \
+            --tag arm64-builder \
+            --load \
+            -f Dockerfile.build \
+            .
+          
+          docker create --name builder arm64-builder
+          docker cp builder:/build/build/ ./
+          docker rm builder
+          
+          # Find and rename the generated .deb file
+          DEB_FILE=$(find build -name "*.deb" -type f | head -1)
+          if [ -n "$DEB_FILE" ]; then
+            mv "$DEB_FILE" "package_${{ matrix.arch }}.deb"
+          fi
+          
+        else
+          # Build ARMHF using cross-compiler
+          echo "Building ARMHF package using cross-compiler"
+          
+          mkdir -p build_armhf
+          cd build_armhf
+          
+          cmake .. \
+            -DCMAKE_CXX_COMPILER=$(which arm-linux-gnueabihf-g++-12) \
+            -DCMAKE_C_COMPILER=$(which arm-linux-gnueabihf-gcc-12) \
+            -DARCHITECTURE="armhf" \
+            -DGIT_VERSION="${{ env.VERSION }}"
+          
+          make -j$(nproc)
+          make package
+          
+          # Find and rename the generated .deb file
+          DEB_FILE=$(find . -name "*armhf.deb" -type f | head -1)
+          if [ -n "$DEB_FILE" ]; then
+            mv "$DEB_FILE" "../package_${{ matrix.arch }}.deb"
+          fi
+        fi
+
+    - name: Verify Package
+      run: |
+        echo "Verifying ${{ matrix.arch }} package..."
         
-        # Create container and extract package
-        docker create --name builder arm64-builder
-        docker cp builder:/build/build/ ./
-        docker rm builder
-        
-        # Find the generated .deb file
-        ARM64_FILENAME=$(ls build/*.deb | head -1)
-        if [ -z "$ARM64_FILENAME" ]; then
-          echo "Error: No .deb file found!"
-          ls -la build/
+        if [ -f "package_${{ matrix.arch }}.deb" ]; then
+          echo "Package file: package_${{ matrix.arch }}.deb"
+          echo "Package info:"
+          dpkg-deb -I "package_${{ matrix.arch }}.deb" || true
+          
+          # Get actual filename for artifact
+          ORIG_NAME=$(basename $(dpkg-deb -f "package_${{ matrix.arch }}.deb" Package)_$(dpkg-deb -f "package_${{ matrix.arch }}.deb" Version)_${{ matrix.arch }}.deb)
+          echo "ORIG_NAME=$ORIG_NAME" >> $GITHUB_ENV
+          mv "package_${{ matrix.arch }}.deb" "$ORIG_NAME"
+        else
+          echo "ERROR: No package file found for ${{ matrix.arch }}!"
+          ls -la
           exit 1
         fi
-        
-        echo "Generated package: $ARM64_FILENAME"
-        echo "arm64_filename=$(basename $ARM64_FILENAME)" >> $GITHUB_ENV
-        echo "version=$VERSION" >> $GITHUB_ENV
 
-    - name: Verify Debian package
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ matrix.arch }}-package
+        path: ${{ env.ORIG_NAME }}
+        retention-days: 5
+
+  create-release:
+    name: Create Release and Upload Assets
+    runs-on: ubuntu-22.04
+    needs: build-arm-packages
+    if: success()
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+
+    - name: Download ARM64 Artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: arm64-package
+        path: artifacts/
+
+    - name: Download ARMHF Artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: armhf-package
+        path: artifacts/
+
+    - name: Extract Version
       run: |
-        echo "Verifying Debian package structure..."
-        dpkg-deb -I ./build/${{ env.arm64_filename }}
-        echo "Package contents:"
-        dpkg-deb -c ./build/${{ env.arm64_filename }}
+        VERSION=$(echo "${{ github.ref }}" | sed 's|refs/tags/||' | sed 's/^v//')
+        echo "VERSION=$VERSION" >> $GITHUB_ENV
+        echo "Creating release for version: $VERSION"
 
     - name: Create Release
       id: create_release
@@ -102,13 +197,41 @@ jobs:
         release_name: Release ${{ github.ref_name }}
         draft: false
         prerelease: false
+        body: |
+          ARM Cross-Platform Release
+          
+          This release contains packages for both ARM architectures:
+          - **ARM64** (64-bit): For PocketBeagle 2 and other ARMv8/AArch64 devices
+          - **ARMHF** (32-bit): For ARMv7 devices with hard-float ABI
 
-    - name: Upload Release Asset
+    - name: Upload ARM64 Asset
       uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./build/${{ env.arm64_filename }}
-        asset_name: ${{ env.arm64_filename }}
+        asset_path: artifacts/$(ls artifacts/*arm64*.deb | head -1)
+        asset_name: $(basename $(ls artifacts/*arm64*.deb | head -1))
         asset_content_type: application/vnd.debian.binary-package
+
+    - name: Upload ARMHF Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: artifacts/$(ls artifacts/*armhf*.deb | head -1)
+        asset_name: $(basename $(ls artifacts/*armhf*.deb | head -1))
+        asset_content_type: application/vnd.debian.binary-package
+
+    - name: List Generated Packages
+      run: |
+        echo "Generated packages:"
+        ls -la artifacts/
+        echo ""
+        echo "Package details:"
+        for pkg in artifacts/*.deb; do
+          echo "=== $(basename $pkg) ==="
+          dpkg-deb -I "$pkg" | grep -E "(Package|Version|Architecture|Depends)"
+          echo ""
+        done
