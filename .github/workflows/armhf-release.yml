@@ -18,14 +18,16 @@ jobs:
     
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
     
     - name: Extract Version
+      id: extract_version
       run: |
         VERSION=$(echo "${{ github.ref }}" | sed 's|refs/tags/||' | sed 's/^v//')
         echo "VERSION=$VERSION" >> $GITHUB_ENV
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
         echo "Building version: $VERSION"
 
     - name: Setup QEMU (for ARM64)
@@ -56,6 +58,7 @@ jobs:
           file
 
     - name: Build Package
+      id: build_package
       run: |
         echo "Building for ${{ matrix.arch }}"
         
@@ -133,30 +136,52 @@ jobs:
           fi
         fi
 
+        # Verify package exists
+        if [ -f "package_${{ matrix.arch }}.deb" ]; then
+          echo "Package built successfully: package_${{ matrix.arch }}.deb"
+          echo "package_path=package_${{ matrix.arch }}.deb" >> $GITHUB_OUTPUT
+        else
+          echo "ERROR: No package file found!"
+          ls -la
+          exit 1
+        fi
+
     - name: Verify Package
+      id: verify_package
       run: |
         echo "Verifying ${{ matrix.arch }} package..."
         
-        if [ -f "package_${{ matrix.arch }}.deb" ]; then
-          echo "Package file: package_${{ matrix.arch }}.deb"
+        PACKAGE_PATH="${{ steps.build_package.outputs.package_path }}"
+        
+        if [ -f "$PACKAGE_PATH" ]; then
+          echo "Package file: $PACKAGE_PATH"
           echo "Package info:"
-          dpkg-deb -I "package_${{ matrix.arch }}.deb" || true
+          dpkg-deb -I "$PACKAGE_PATH" || true
           
-          # Get actual filename for artifact
-          ORIG_NAME=$(basename $(dpkg-deb -f "package_${{ matrix.arch }}.deb" Package)_$(dpkg-deb -f "package_${{ matrix.arch }}.deb" Version)_${{ matrix.arch }}.deb)
-          echo "ORIG_NAME=$ORIG_NAME" >> $GITHUB_ENV
-          mv "package_${{ matrix.arch }}.deb" "$ORIG_NAME"
+          # Extract package metadata
+          PACKAGE_NAME=$(dpkg-deb -f "$PACKAGE_PATH" Package 2>/dev/null || echo "unknown-package")
+          PACKAGE_VERSION=$(dpkg-deb -f "$PACKAGE_PATH" Version 2>/dev/null || echo "unknown-version")
+          
+          # Create proper filename
+          ORIG_FILENAME="${PACKAGE_NAME}_${PACKAGE_VERSION}_${{ matrix.arch }}.deb"
+          echo "Original filename will be: $ORIG_FILENAME"
+          
+          # Rename package with proper architecture
+          mv "$PACKAGE_PATH" "$ORIG_FILENAME"
+          
+          echo "orig_filename=$ORIG_FILENAME" >> $GITHUB_OUTPUT
+          echo "ORIG_FILENAME=$ORIG_FILENAME" >> $GITHUB_ENV
         else
-          echo "ERROR: No package file found for ${{ matrix.arch }}!"
+          echo "ERROR: Package file not found at $PACKAGE_PATH!"
           ls -la
           exit 1
         fi
 
     - name: Upload Artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.arch }}-package
-        path: ${{ env.ORIG_NAME }}
+        path: ${{ env.ORIG_FILENAME }}
         retention-days: 5
 
   create-release:
@@ -167,18 +192,11 @@ jobs:
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
-    - name: Download ARM64 Artifact
-      uses: actions/download-artifact@v3
+    - name: Download All Artifacts
+      uses: actions/download-artifact@v4
       with:
-        name: arm64-package
-        path: artifacts/
-
-    - name: Download ARMHF Artifact
-      uses: actions/download-artifact@v3
-      with:
-        name: armhf-package
         path: artifacts/
 
     - name: Extract Version
@@ -187,14 +205,22 @@ jobs:
         echo "VERSION=$VERSION" >> $GITHUB_ENV
         echo "Creating release for version: $VERSION"
 
+    - name: List Downloaded Artifacts
+      run: |
+        echo "Downloaded artifacts structure:"
+        find artifacts/ -type f -name "*.deb" | while read file; do
+          echo "Found: $file"
+          dpkg-deb -I "$file" 2>/dev/null | grep -E "(Package|Version|Architecture)" || echo "Could not read package info"
+        done
+
     - name: Create Release
       id: create_release
-      uses: actions/create-release@v1
+      uses: softprops/action-gh-release@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tag_name: ${{ github.ref_name }}
-        release_name: Release ${{ github.ref_name }}
+        name: Release ${{ github.ref_name }}
         draft: false
         prerelease: false
         body: |
@@ -203,35 +229,66 @@ jobs:
           This release contains packages for both ARM architectures:
           - **ARM64** (64-bit): For PocketBeagle 2 and other ARMv8/AArch64 devices
           - **ARMHF** (32-bit): For ARMv7 devices with hard-float ABI
+          
+          ### Download Links
+          - ARM64 Package: [$(basename $(find artifacts/ -name "*arm64*.deb" -o -name "*arm64-package*/*.deb" 2>/dev/null | head -1))](#)
+          - ARMHF Package: [$(basename $(find artifacts/ -name "*armhf*.deb" -o -name "*armhf-package*/*.deb" 2>/dev/null | head -1))](#)
 
-    - name: Upload ARM64 Asset
-      uses: actions/upload-release-asset@v1
+    - name: Upload ARM64 Asset to Release
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: artifacts/$(ls artifacts/*arm64*.deb | head -1)
-        asset_name: $(basename $(ls artifacts/*arm64*.deb | head -1))
-        asset_content_type: application/vnd.debian.binary-package
+      run: |
+        # Find the ARM64 package
+        ARM64_PACKAGE=$(find artifacts/ -name "*arm64*.deb" -o -path "*/arm64-package/*.deb" 2>/dev/null | head -1)
+        
+        if [ -z "$ARM64_PACKAGE" ]; then
+          echo "ERROR: ARM64 package not found!"
+          find artifacts/ -type f
+          exit 1
+        fi
+        
+        echo "Uploading ARM64 package: $ARM64_PACKAGE"
+        
+        # Use GitHub CLI to upload the asset
+        gh release upload "${{ github.ref_name }}" "$ARM64_PACKAGE" \
+          --repo "${{ github.repository }}"
+      continue-on-error: false
 
-    - name: Upload ARMHF Asset
-      uses: actions/upload-release-asset@v1
+    - name: Upload ARMHF Asset to Release
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: artifacts/$(ls artifacts/*armhf*.deb | head -1)
-        asset_name: $(basename $(ls artifacts/*armhf*.deb | head -1))
-        asset_content_type: application/vnd.debian.binary-package
+      run: |
+        # Find the ARMHF package
+        ARMHF_PACKAGE=$(find artifacts/ -name "*armhf*.deb" -o -path "*/armhf-package/*.deb" 2>/dev/null | head -1)
+        
+        if [ -z "$ARMHF_PACKAGE" ]; then
+          echo "ERROR: ARMHF package not found!"
+          find artifacts/ -type f
+          exit 1
+        fi
+        
+        echo "Uploading ARMHF package: $ARMHF_PACKAGE"
+        
+        # Use GitHub CLI to upload the asset
+        gh release upload "${{ github.ref_name }}" "$ARMHF_PACKAGE" \
+          --repo "${{ github.repository }}"
+      continue-on-error: false
+
+    - name: Install GitHub CLI (if not present)
+      if: failure()
+      run: |
+        # Install GitHub CLI if needed for upload
+        type -p gh >/dev/null || curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+        sudo apt update
+        sudo apt install -y gh
 
     - name: List Generated Packages
       run: |
         echo "Generated packages:"
-        ls -la artifacts/
-        echo ""
-        echo "Package details:"
-        for pkg in artifacts/*.deb; do
-          echo "=== $(basename $pkg) ==="
-          dpkg-deb -I "$pkg" | grep -E "(Package|Version|Architecture|Depends)"
+        find artifacts/ -name "*.deb" -type f | while read pkg; do
+          echo "=== $(basename "$pkg") ==="
+          dpkg-deb -I "$pkg" 2>/dev/null | grep -E "(Package|Version|Architecture|Depends|Installed-Size)" || echo "Could not read package info"
+          echo "Path: $pkg"
           echo ""
         done
