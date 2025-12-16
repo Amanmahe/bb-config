@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+env:
+  PACKAGE_NAME: bb-config
+
 jobs:
   build-packages:
     name: Build ${{ matrix.arch }} Package
@@ -32,7 +35,7 @@ jobs:
         VERSION=$(echo "${{ github.ref }}" | sed 's|refs/tags/||' | sed 's/^v//')
         echo "VERSION=$VERSION" >> $GITHUB_ENV
         echo "version=$VERSION" >> $GITHUB_OUTPUT
-        echo "Building version: $VERSION"
+        echo "Building ${{ env.PACKAGE_NAME }} version: $VERSION"
     
     - name: Setup QEMU
       uses: docker/setup-qemu-action@v3
@@ -41,8 +44,14 @@ jobs:
       uses: docker/setup-buildx-action@v3
     
     - name: Build with Docker
+      id: build_package
       run: |
-        echo "Building for ${{ matrix.arch }}"
+        echo "Building ${{ env.PACKAGE_NAME }} for ${{ matrix.arch }}"
+        
+        # Create final package name
+        FINAL_FILENAME="${{ env.PACKAGE_NAME }}-v${{ env.VERSION }}-${{ matrix.arch }}.deb"
+        echo "Final package will be: $FINAL_FILENAME"
+        echo "final_filename=$FINAL_FILENAME" >> $GITHUB_OUTPUT
         
         # Create a Dockerfile
         cat > Dockerfile.build << 'DOCKERFILE'
@@ -51,6 +60,7 @@ jobs:
         ARG VERSION
         ARG CPU_FLAGS
         ARG DEB_ARCH
+        ARG PACKAGE_NAME
         ENV DEBIAN_FRONTEND=noninteractive
         
         RUN apt-get update && apt-get install -y \
@@ -85,42 +95,45 @@ jobs:
           --build-arg VERSION="${{ env.VERSION }}" \
           --build-arg CPU_FLAGS="${{ matrix.cpu_flags }}" \
           --build-arg DEB_ARCH="${{ matrix.deb_arch }}" \
+          --build-arg PACKAGE_NAME="${{ env.PACKAGE_NAME }}" \
           --load \
           -f Dockerfile.build \
           .
         
         echo "Extracting package from container..."
         docker create --name builder ${{ matrix.arch }}-builder
-        docker cp builder:/build/build/ ./
+        docker cp builder:/build/build/ ./build-output/
         docker rm builder
         
-        # Find and copy the package
-        DEB_FILE=$(find build -name "*.deb" -type f | head -1)
+        # Find and rename the package
+        DEB_FILE=$(find build-output -name "*.deb" -type f | head -1)
         if [ -n "$DEB_FILE" ]; then
-          # Extract package info for better naming
-          PKG_NAME=$(basename "$DEB_FILE")
-          mv "$DEB_FILE" "package_${{ matrix.arch }}.deb"
-          echo "Package created: package_${{ matrix.arch }}.deb"
-          ls -la "package_${{ matrix.arch }}.deb"
-          echo "package_filename=package_${{ matrix.arch }}.deb" >> $GITHUB_ENV
-          echo "original_pkg_name=$PKG_NAME" >> $GITHUB_ENV
+          # Get original package name and version
+          ORIG_NAME=$(basename "$DEB_FILE")
+          
+          # Rename to final format
+          mv "$DEB_FILE" "$FINAL_FILENAME"
+          echo "Package renamed from $ORIG_NAME to $FINAL_FILENAME"
+          echo "Package created: $FINAL_FILENAME"
+          ls -la "$FINAL_FILENAME"
         else
           echo "ERROR: No .deb file found!"
-          find . -name "*.deb" -type f
+          find build-output -type f
           exit 1
         fi
     
     - name: Verify Package
       run: |
-        echo "Verifying package..."
-        if [ -f "package_${{ matrix.arch }}.deb" ]; then
+        FINAL_FILENAME="${{ steps.build_package.outputs.final_filename }}"
+        echo "Verifying package: $FINAL_FILENAME"
+        
+        if [ -f "$FINAL_FILENAME" ]; then
           echo "Package info:"
-          dpkg-deb -I "package_${{ matrix.arch }}.deb" || true
+          dpkg-deb -I "$FINAL_FILENAME" || true
           echo ""
-          echo "Package contents:"
-          dpkg-deb -c "package_${{ matrix.arch }}.deb" | head -20
+          echo "Package filename verified: $FINAL_FILENAME"
         else
-          echo "ERROR: Package file not found!"
+          echo "ERROR: Package file '$FINAL_FILENAME' not found!"
           exit 1
         fi
     
@@ -128,7 +141,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.arch }}-package
-        path: package_${{ matrix.arch }}.deb
+        path: ${{ steps.build_package.outputs.final_filename }}
         retention-days: 5
 
   create-release:
@@ -160,13 +173,14 @@ jobs:
       run: |
         VERSION=$(echo "${{ github.ref }}" | sed 's|refs/tags/||' | sed 's/^v//')
         echo "VERSION=$VERSION" >> $GITHUB_ENV
+        echo "PACKAGE_NAME=${{ env.PACKAGE_NAME }}" >> $GITHUB_ENV
     
     - name: Find Package Files
       id: find_packages
       run: |
         # Find all .deb files in artifacts
-        ARM64_PKG=$(find artifacts/ -name "*arm64*.deb" -o -name "*package_arm64.deb" -o -path "*/arm64-package/*.deb" | head -1)
-        ARMHF_PKG=$(find artifacts/ -name "*armhf*.deb" -o -name "*package_armhf.deb" -o -path "*/armhf-package/*.deb" | head -1)
+        ARM64_PKG=$(find artifacts/ -name "*arm64*.deb" -o -path "*/arm64-package/*.deb" | head -1)
+        ARMHF_PKG=$(find artifacts/ -name "*armhf*.deb" -o -path "*/armhf-package/*.deb" | head -1)
         
         if [ -n "$ARM64_PKG" ]; then
           ARM64_BASENAME=$(basename "$ARM64_PKG")
@@ -176,6 +190,7 @@ jobs:
         else
           echo "ERROR: ARM64 package not found!"
           find artifacts/ -type f
+          exit 1
         fi
         
         if [ -n "$ARMHF_PKG" ]; then
@@ -186,6 +201,7 @@ jobs:
         else
           echo "ERROR: ARMHF package not found!"
           find artifacts/ -type f
+          exit 1
         fi
     
     - name: Create Release with Assets
@@ -212,6 +228,10 @@ jobs:
           # ARMHF devices  
           sudo dpkg -i ${{ steps.find_packages.outputs.armhf_basename }}
           ```
+          
+          ### Files
+          - `${{ steps.find_packages.outputs.arm64_basename }}` (ARM64/64-bit)
+          - `${{ steps.find_packages.outputs.armhf_basename }}` (ARMHF/32-bit)
         files: |
           ${{ steps.find_packages.outputs.arm64_package }}
           ${{ steps.find_packages.outputs.armhf_package }}
