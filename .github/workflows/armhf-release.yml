@@ -53,7 +53,7 @@ jobs:
         echo "Final package will be: $FINAL_FILENAME"
         echo "final_filename=$FINAL_FILENAME" >> $GITHUB_OUTPUT
         
-        # Create a Dockerfile
+        # Create a Dockerfile with retry logic
         cat > Dockerfile.build << 'DOCKERFILE'
         FROM ubuntu:22.04
         
@@ -63,7 +63,13 @@ jobs:
         ARG PACKAGE_NAME
         ENV DEBIAN_FRONTEND=noninteractive
         
-        RUN apt-get update && apt-get install -y \
+        # Update repositories with retry
+        RUN for i in 1 2 3; do \
+            apt-get update && break || sleep 5; \
+            done
+        
+        # Install dependencies with minimal flags
+        RUN apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
             pkg-config \
@@ -73,6 +79,7 @@ jobs:
             dh-make \
             git \
             file \
+            ca-certificates \
             && rm -rf /var/lib/apt/lists/*
         
         WORKDIR /build
