@@ -15,14 +15,10 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v4
     
-    - name: Setup Docker
-      uses: docker/setup-qemu-action@v3
-    
     - name: Build with Docker
       run: |
         echo "Running test build in Docker..."
         
-        # Build and test in Docker container
         docker run --rm \
           -v "$(pwd):/build" \
           -w /build \
@@ -35,8 +31,9 @@ jobs:
               pkg-config \
               libnm-dev \
               libglib2.0-dev \
+              git \               
+              ca-certificates \
               && rm -rf /var/lib/apt/lists/* \
             && mkdir -p build && cd build \
             && cmake .. \
-            && make -j\$(nproc) \
-            && echo 'Test build successful!'"
+            && make -j\$(nproc)"
