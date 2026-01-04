@@ -17,23 +17,8 @@ jobs:
     
     - name: Build with Docker
       run: |
-        echo "Running test build in Docker..."
-        
         docker run --rm \
           -v "$(pwd):/build" \
           -w /build \
           ubuntu:22.04 \
-          /bin/bash -c "
-            apt-get update && \
-            apt-get install -y --no-install-recommends \
-              build-essential \
-              cmake \
-              pkg-config \
-              libnm-dev \
-              libglib2.0-dev \
-              git \               
-              ca-certificates \
-              && rm -rf /var/lib/apt/lists/* \
-            && mkdir -p build && cd build \
-            && cmake .. \
-            && make -j\$(nproc)"
+          bash -c "apt-get update && apt-get install -y --no-install-recommends build-essential cmake pkg-config libnm-dev libglib2.0-dev git ca-certificates && rm -rf /var/lib/apt/lists/* && mkdir -p build && cd build && cmake .. && make -j\$(nproc)"
