@@ -7,21 +7,36 @@ on:
       - main
 
 jobs:
-  armhf:
-    name: Test build
-    runs-on: ubuntu-latest
+  test-build:
+    name: Test Build
+    runs-on: ubuntu-22.04
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v2
-    - name: Install Deps
+      uses: actions/checkout@v4
+    
+    - name: Setup Docker
+      uses: docker/setup-qemu-action@v3
+    
+    - name: Build with Docker
       run: |
-        sudo apt install gcc-12 g++-12 libnm-dev libglib2.0-dev -y
-    - name: Build
-      run: |
-        cd ${{ github.workspace }}
-        mkdir build
-        cd build
-        cmake ..  -DCMAKE_CXX_COMPILER=$(which g++-12) \
-                  -DCMAKE_C_COMPILER=$(which gcc-12)
-        make -j$(nproc)
+        echo "Running test build in Docker..."
+        
+        # Build and test in Docker container
+        docker run --rm \
+          -v "$(pwd):/build" \
+          -w /build \
+          ubuntu:22.04 \
+          /bin/bash -c "
+            apt-get update && \
+            apt-get install -y --no-install-recommends \
+              build-essential \
+              cmake \
+              pkg-config \
+              libnm-dev \
+              libglib2.0-dev \
+              && rm -rf /var/lib/apt/lists/* \
+            && mkdir -p build && cd build \
+            && cmake .. \
+            && make -j\$(nproc) \
+            && echo 'Test build successful!'"
