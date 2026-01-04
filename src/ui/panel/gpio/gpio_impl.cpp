@@ -257,7 +257,7 @@ class GPIOImpl : public PanelBase {
  private:
   // Dynamic GPIO chip detection for any board
   std::vector<std::pair<int, std::string>> getGpioPins() {
-    std::vector<std::pair<int, std::string>> pins;
+    std::vector<std::pair<int, std::string>> detected_pins;  
     
     // First, try to get chip info using gpioinfo
     std::string output = exec("gpioinfo 2>/dev/null");
@@ -395,7 +395,7 @@ class GPIOImpl : public PanelBase {
                   label = "GPIO_" + std::to_string(gpio_num);
                 }
                 
-                pins.push_back({gpio_num, label});
+                detected_pins.push_back({gpio_num, label});  
               }
             }
           }
@@ -403,16 +403,16 @@ class GPIOImpl : public PanelBase {
       }
     }
     
-    return pins;
+    return detected_pins;  
   }
 
   // Fallback GPIO detection from /sys/class/gpio
   std::vector<std::pair<int, std::string>> detectGpioFromSysfs() {
-    std::vector<std::pair<int, std::string>> pins;
+    std::vector<std::pair<int, std::string>> sysfs_pins;  
     
     // Check if /sys/class/gpio exists
     if (!std::filesystem::exists("/sys/class/gpio")) {
-      return pins;
+      return sysfs_pins;  
     }
     
     // Look for already exported GPIOs
@@ -440,7 +440,7 @@ class GPIOImpl : public PanelBase {
             }
           }
           
-          pins.push_back({gpio_num, label});
+          sysfs_pins.push_back({gpio_num, label});  
         } catch (...) {
           // Skip if not a number
           continue;
@@ -448,7 +448,7 @@ class GPIOImpl : public PanelBase {
       }
     }
     
-    return pins;
+    return sysfs_pins; 
   }
 
   // Export a GPIO if not already exported
