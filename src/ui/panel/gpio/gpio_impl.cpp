@@ -255,33 +255,63 @@ class GPIOImpl : public PanelBase {
   std::string Title() override { return "GPIO"; }
 
  private:
-  // Get GPIO pin information using gpioinfo
+  // Dynamic GPIO chip detection for any board
   std::vector<std::pair<int, std::string>> getGpioPins() {
     std::vector<std::pair<int, std::string>> pins;
     
+    // First, try to get chip info using gpioinfo
     std::string output = exec("gpioinfo 2>/dev/null");
+    
+    // If gpioinfo fails, try alternative methods
     if (output.empty()) {
-      return pins;
+      // Try to detect GPIOs from /sys/class/gpio
+      return detectGpioFromSysfs();
     }
     
     std::istringstream iss(output);
     std::string line;
-    
-    // Chip number to GPIO base mapping (from your earlier output)
-    std::map<int, int> chip_to_base = {
-      {0, 512},  // gpiochip0 -> base 512
-      {1, 515},  // gpiochip1 -> base 515
-      {2, 539},  // gpiochip2 -> base 539
-      {3, 631},  // gpiochip3 -> base 631
-      {4, 683},  // gpiochip4 -> base 683
-    };
-    
+    std::map<int, int> chip_to_base;
     int current_chip = -1;
+    
+    // First pass: collect chip information
+    while (std::getline(iss, line)) {
+      // Look for chip information line
+      if (line.find("gpiochip") != std::string::npos && 
+          line.find("lines") != std::string::npos) {
+        
+        // Extract chip number
+        size_t chip_pos = line.find("gpiochip");
+        if (chip_pos != std::string::npos) {
+          std::string chip_num_str;
+          for (size_t i = chip_pos + 8; i < line.size() && isdigit(line[i]); i++) {
+            chip_num_str += line[i];
+          }
+          if (!chip_num_str.empty()) {
+            current_chip = std::stoi(chip_num_str);
+          }
+        }
+        
+        // Extract base number from the line
+        std::regex base_regex("\\[([0-9]+)\\s*-");
+        std::smatch base_match;
+        if (std::regex_search(line, base_match, base_regex) && base_match.size() > 1) {
+          int base = std::stoi(base_match[1]);
+          chip_to_base[current_chip] = base;
+        }
+        continue;
+      }
+    }
+    
+    // Second pass: collect GPIO pins
+    iss.clear();
+    iss.str(output);
+    current_chip = -1;
     
     while (std::getline(iss, line)) {
       // Check for chip header
-      if (line.find("gpiochip") != std::string::npos) {
-        // Extract chip number
+      if (line.find("gpiochip") != std::string::npos && 
+          line.find("lines") != std::string::npos) {
+        // Extract chip number again
         size_t chip_pos = line.find("gpiochip");
         if (chip_pos != std::string::npos) {
           std::string chip_num_str;
@@ -295,7 +325,7 @@ class GPIOImpl : public PanelBase {
         continue;
       }
       
-      // Check for pin line
+      // Check for pin line with a label
       if (line.find("line") != std::string::npos && current_chip >= 0 && 
           chip_to_base.find(current_chip) != chip_to_base.end()) {
         
@@ -325,20 +355,95 @@ class GPIOImpl : public PanelBase {
                 }
               }
               
-              // Check if it's a P1/P2 pin or USR_LED
-              if (!label.empty() && 
-                  (label.find("P1.") != std::string::npos || 
-                   label.find("P2.") != std::string::npos ||
-                   label.find("USR_LED") != std::string::npos)) {
-                
+              // Check for common GPIO labels
+              bool is_user_gpio = false;
+              
+              if (!label.empty()) {
+                // Check for common GPIO patterns
+                if (label.find("GPIO") != std::string::npos ||
+                    label.find("P") != std::string::npos ||
+                    label.find("USR") != std::string::npos ||
+                    label.find("LED") != std::string::npos ||
+                    label.find("BTN") != std::string::npos) {
+                  is_user_gpio = true;
+                }
+              } else {
+                // If no label, check if it's a user-accessible GPIO by checking the name field
+                size_t name_pos = line.find("name:", colon_pos);
+                if (name_pos != std::string::npos) {
+                  size_t name_end = line.find(",", name_pos);
+                  if (name_end != std::string::npos) {
+                    label = line.substr(name_pos + 5, name_end - name_pos - 5);
+                    label.erase(0, label.find_first_not_of(" \t"));
+                    label.erase(label.find_last_not_of(" \t") + 1);
+                    
+                    if (label.find("GPIO") != std::string::npos ||
+                        label.find("P") != std::string::npos) {
+                      is_user_gpio = true;
+                    }
+                  }
+                }
+              }
+              
+              if (is_user_gpio) {
                 // Calculate GPIO number
                 int base = chip_to_base[current_chip];
                 int gpio_num = base + line_num;
+                
+                // Use label or create generic one
+                if (label.empty()) {
+                  label = "GPIO_" + std::to_string(gpio_num);
+                }
                 
                 pins.push_back({gpio_num, label});
               }
             }
           }
+        }
+      }
+    }
+    
+    return pins;
+  }
+
+  // Fallback GPIO detection from /sys/class/gpio
+  std::vector<std::pair<int, std::string>> detectGpioFromSysfs() {
+    std::vector<std::pair<int, std::string>> pins;
+    
+    // Check if /sys/class/gpio exists
+    if (!std::filesystem::exists("/sys/class/gpio")) {
+      return pins;
+    }
+    
+    // Look for already exported GPIOs
+    for (const auto& entry : std::filesystem::directory_iterator("/sys/class/gpio")) {
+      std::string entry_name = entry.path().filename().string();
+      
+      if (entry_name.find("gpio") == 0 && entry_name != "gpiochip") {
+        // Extract GPIO number
+        std::string gpio_num_str = entry_name.substr(4);
+        
+        try {
+          int gpio_num = std::stoi(gpio_num_str);
+          
+          // Check if it's a valid GPIO (not a chip)
+          std::string label_path = entry.path().string() + "/label";
+          std::string label = "GPIO_" + gpio_num_str;
+          
+          if (std::filesystem::exists(label_path)) {
+            std::ifstream label_file(label_path);
+            if (label_file.is_open()) {
+              std::getline(label_file, label);
+              if (label.empty()) {
+                label = "GPIO_" + gpio_num_str;
+              }
+            }
+          }
+          
+          pins.push_back({gpio_num, label});
+        } catch (...) {
+          // Skip if not a number
+          continue;
         }
       }
     }
@@ -370,22 +475,48 @@ class GPIOImpl : public PanelBase {
     return false;
   }
 
+  // Try to export common GPIOs for testing
+  void tryExportCommonGpios() {
+    // Try exporting some common GPIO numbers for testing
+    std::vector<int> common_gpios = {2, 3, 4, 17, 27, 22, 10, 9, 11, 0, 5, 6, 13, 19, 26, 14, 15, 18, 23, 24, 25, 8, 7, 1, 12, 16, 20, 21};
+    
+    for (int gpio : common_gpios) {
+      exportGpio(gpio);
+      usleep(10000); // 10ms between exports
+    }
+  }
+
   void BuildUI() {
-    // Get list of GPIO pins from gpioinfo
+    // First, try exporting some common GPIOs for testing
+    tryExportCommonGpios();
+    
+    // Get list of GPIO pins
     auto gpio_pins = getGpioPins();
+    
+    // If no pins found, show all available GPIOs from 0-1023
+    if (gpio_pins.empty()) {
+      for (int i = 0; i < 1024; i++) {
+        if (exportGpio(i)) {
+          std::string label = "GPIO_" + std::to_string(i);
+          pins.push_back({i, label});
+        }
+      }
+    } else {
+      pins = gpio_pins;
+    }
     
     MenuOption menuOpt;
     menuOpt.on_enter = [&] { tab = 1; };
     gpio_menu = Menu(&gpio_names, &selected, menuOpt);
     gpio_individual = Container::Vertical({}, &selected);
     
-    if (!gpio_pins.empty()) {
-      // Process pins from gpioinfo
-      for (const auto& pin : gpio_pins) {
+    if (!pins.empty()) {
+      // Process detected pins
+      for (const auto& pin : pins) {
         int gpio_num = pin.first;
         std::string label = pin.second;
         
-        // Try to export the GPIO
+        // Try to export the GPIO (if not already)
         if (exportGpio(gpio_num)) {
           std::string gpio_num_str = std::to_string(gpio_num);
           auto gpio = std::make_shared<Gpio>(gpio_num_str, label, &tab, &selected, &limit);
@@ -399,9 +530,9 @@ class GPIOImpl : public PanelBase {
     // If no pins found, show error message
     if (children_.empty()) {
       error_message_ = "No GPIO pins found. Make sure:\n"
-                       "1. gpiod is installed (sudo apt-get install gpiod)\n"
-                       "2. Run with sudo privileges\n"
-                       "3. GPIOs are accessible";
+                       "1. Run with sudo privileges\n"
+                       "2. GPIOs are accessible\n"
+                       "3. Check board compatibility";
     }
 
     Add(Container::Tab(
@@ -425,13 +556,15 @@ class GPIOImpl : public PanelBase {
                           text("No GPIO pins found."),
                           text(""),
                           text("Possible issues:"),
-                          text("1. gpiod not installed - run: sudo apt-get install gpiod"),
-                          text("2. Need sudo privileges - run program with sudo"),
-                          text("3. GPIOs not exported - run export script"),
+                          text("1. Need sudo privileges - run program with sudo"),
+                          text("2. Board not detected - trying common GPIOs"),
                           text(""),
-                          text("Try running:"),
-                          text("  sudo ./export_beaglebone_pins.sh"),
-                          text("  sudo gpioinfo")
+                          text("Trying to export common GPIOs..."),
+                          separator(),
+                          text("Manually export GPIOs:"),
+                          text("  echo <number> > /sys/class/gpio/export"),
+                          text(""),
+                          text("Example: sudo echo 17 > /sys/class/gpio/export")
                       }) | center | flex);
       }
       
@@ -452,14 +585,15 @@ class GPIOImpl : public PanelBase {
                         text("Available GPIOs: 0"),
                         text(""),
                         text("No GPIO pins detected."),
-                        text("Try running with sudo or check installation.")
+                        text("Try running with sudo or check board compatibility.")
                     }) | center | flex);
     }
 
-    return window(text("GPIO Menu - " + std::to_string(children_.size()) + " pins"),
+    return window(text("GPIO Menu - " + std::to_string(children_.size()) + " pins detected"),
                   gpio_menu->Render() | vscroll_indicator | frame | flex);
   }
 
+  std::vector<std::pair<int, std::string>> pins;
   std::vector<std::shared_ptr<Gpio>> children_;
   std::vector<std::string> gpio_names;
   Component gpio_menu;
